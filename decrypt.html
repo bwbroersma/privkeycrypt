@@ -1,0 +1,125 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>Decrypt data</title>
+<style>
+    textarea { width: 600px; height: 225px;}
+</style>
+Private key (PKCS #1 or unencrypted #8):<br><textarea id="pkcs8" placeholder="----BEGIN PRIVATE KEY----
+Base64==
+----END PRIVATE KEY----"></textarea><br><button id="loadprivkey">load privkey (decrypt)</button><hr>
+aes-gcm decoded:<br><textarea id="out" placeholder="output cert"></textarea>
+<script>
+    /*
+    Convert a string into an ArrayBuffer
+    from https://developers.google.com/web/updates/2012/06/How-to-convert-ArrayBuffer-to-and-from-String
+    */
+    function str2ab(str) {
+        const buf = new ArrayBuffer(str.length);
+        const bufView = new Uint8Array(buf);
+        for (let i = 0, strLen = str.length; i < strLen; i++) {
+            bufView[i] = str.charCodeAt(i);
+        }
+        return buf;
+    }
+    function ab2str(arrayBuffer){
+        return String.fromCharCode(...new Uint8Array(arrayBuffer))
+    }
+    function abmerge(b1, b2) {
+        var tmp = new Uint8Array(b1.byteLength + b2.byteLength);
+        tmp.set(new Uint8Array(b1), 0);
+        tmp.set(new Uint8Array(b2), b1.byteLength);
+        return tmp.buffer;
+    };
+    function download(dataurl, filename) {
+        const link = document.createElement("a");
+        link.href = dataurl;
+        link.download = filename;
+        link.click();
+    }
+    const pkcs8start = '-----BEGIN PRIVATE KEY-----';
+    const pkcs8end = '-----END PRIVATE KEY-----';
+    const pkcs1start = '-----BEGIN RSA PRIVATE KEY-----';
+    const pkcs1end = '-----END RSA PRIVATE KEY-----';
+    function topk8(pkcs1arr) {
+        return abmerge(
+            // https://lapo.it/asn1js: PKCS8 = PKCS1 + 22+4 bytes
+            // [30,82,(2 byte length), // constructed sequence:4+(X+22)
+            //  02,01,00, //integer:2+1 [0]
+            //  30,0D,06,09,2A,86,48,86,F7,0D,01,01,01,05,00 // constructed sequence:13+2 [oid:9+2 1.2.840.113549.1.1.1 rsaEncryption, null:2+0]
+            //  04 82 (2 byte length) //octet string:4+X
+            new Uint8Array([
+                0x30, 0x82, Math.floor((pkcs1arr.byteLength + 22) / 256), (pkcs1arr.byteLength + 22) % 256,
+                0x02, 0x01, 0x00,
+                0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00,
+                0x04, 0x82, Math.floor(pkcs1arr.byteLength / 256), pkcs1arr.byteLength % 256
+            ]),
+            pkcs1arr
+        );
+    }
+    async function loadkey(io) {
+        io = io.trim();
+        if (io.startsWith(pkcs1start) && io.endsWith(pkcs1end)) {
+            io = io.substring(pkcs1start.length, io.length - pkcs1end.length);
+            io = btoa(ab2str(topk8(str2ab(atob(io)))));
+        } else if (io.startsWith(pkcs8start) && io.endsWith(pkcs8end)) {
+            io = io.substring(pkcs8start.length, io.length - pkcs8end.length);
+        } else {
+            throw Error('PKCS #1 or #8 header/footer not found (' + pkcs1start + ' or ' + pkcs8start + ')')
+        }
+        return await loadpkcs8key(io);
+    }
+    async function loadpkcs8key(io) {
+        io = io.replace(/[\r\n ]+/g, '');
+        return await window.crypto.subtle.importKey(
+            'pkcs8',
+            str2ab(atob(io)),
+            {
+                name: "RSA-OAEP",
+                hash: "SHA-256",
+            },
+            false,
+            ['decrypt']
+        );
+    }
+    var privkey;
+    // preparse the hash? Note: Outlook can only handle links of 2048 in length!
+    // (so this does whole script not work, inline the encrypted aesgcm result in that case)
+    // we should expect 4096 bytes of RSA block (512 bytes, or 4*ceil(512/3)=684 base64 chars)
+    // and 2373 data bytes + 16 bytes (128 bit GCM) = 2389 bytes or 4*ceil(2389/3)=3188 base64
+    // = 1+684+1+3188 = 3874 = location.hash.length (depending on bits of all 6 integers in RSA)
+    document.getElementById('loadprivkey').onclick=async ()=>{
+        let d = location.hash.substring(1).split(',');
+        try{
+            privkey = await loadkey(document.getElementById('pkcs8').value);
+            aesgcmkeyivdata = await window.crypto.subtle.decrypt(
+                {
+                    name: "RSA-OAEP",
+                    hash: "SHA-256",
+                },
+                privkey,
+                str2ab(atob(d[0]))
+            );
+            let key = await window.crypto.subtle.importKey(
+                "raw",
+                aesgcmkeyivdata.slice(0,32),
+                "AES-GCM",
+                true,
+                ["decrypt"]
+            );
+            let aesgcmdecrypt = await window.crypto.subtle.decrypt(
+                {
+                    name: "AES-GCM",
+                    iv: aesgcmkeyivdata.slice(32,64)
+                },
+                key,
+                str2ab(atob(d[1]))
+            );
+            let out = pkcs8start+"\r\n"+btoa(ab2str(topk8(aesgcmdecrypt))).split(/(.{1,64})/g).filter(x=>x).join("\r\n")+"\r\n"+pkcs8end;
+            document.getElementById('out').value=out;
+            download('data:application/pkcs8+pem;base64,'+btoa(out),'privkey.pem');
+       
+        } catch(e){
+            alert(e);
+        }
+    };
+</script>

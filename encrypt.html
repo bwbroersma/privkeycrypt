@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>Encrypt data</title>
+<style>
+    textarea { width: 600px; height: 225px;}
+</style>
+public key (of the receiving party):<br><textarea id="spki" placeholder="-----BEGIN PUBLIC KEY-----
+Base64==
+-----END PUBLIC KEY-----"></textarea><br>
+private key to encrypt/share:<br><textarea id="data" placeholder="-----BEGIN PRIVATE KEY-----
+Base64==
+-----END PRIVATE KEY-----"></textarea><br><button id="encrypt">encrypt data</button><hr>
+output:<br><textarea id="out" placeholder="#hash"></textarea>
+<script>
+    /*
+    Convert a string into an ArrayBuffer
+    from https://developers.google.com/web/updates/2012/06/How-to-convert-ArrayBuffer-to-and-from-String
+    */
+    function str2ab(str) {
+        const buf = new ArrayBuffer(str.length);
+        const bufView = new Uint8Array(buf);
+        for (let i = 0, strLen = str.length; i < strLen; i++) {
+            bufView[i] = str.charCodeAt(i);
+        }
+        return buf;
+    }
+    function ab2str(arrayBuffer){
+        return String.fromCharCode(...new Uint8Array(arrayBuffer))
+    }
+    function abmerge(b1, b2) {
+        var tmp = new Uint8Array(b1.byteLength + b2.byteLength);
+        tmp.set(new Uint8Array(b1), 0);
+        tmp.set(new Uint8Array(b2), b1.byteLength);
+        return tmp.buffer;
+    };
+    function download(dataurl, filename) {
+        const link = document.createElement("a");
+        link.href = dataurl;
+        link.download = filename;
+        link.click();
+    }
+    const pkcs8start = '-----BEGIN PRIVATE KEY-----';
+    const pkcs8end = '-----END PRIVATE KEY-----';
+    const pkcs1start = '-----BEGIN RSA PRIVATE KEY-----';
+    const pkcs1end = '-----END RSA PRIVATE KEY-----';
+    function pem2der(str) {
+        str = str.trim();
+        if (str.startsWith(pkcs1start) && str.endsWith(pkcs1end)) {
+            str = str.substring(pkcs1start.length, str.length - pkcs1end.length);
+            return str2ab(atob(str));
+        } else if (str.startsWith(pkcs8start) && str.endsWith(pkcs8end)) {
+            str = str.substring(pkcs8start.length, str.length - pkcs8end.length);
+            return str2ab(atob(str)).slice(26); // take PKCS #1 part of the PKCS #8
+        } else {
+            throw Error('PKCS #1 or #8 header/footer not found (' + pkcs1start + ' or ' + pkcs8start + ')')
+        }
+        str = str.replace(/[\r\n ]+/g, '');
+    }
+    async function spki(io) {
+        io = io.trim();
+        const spkistart = '-----BEGIN PUBLIC KEY-----';
+        const spkiend = '-----END PUBLIC KEY-----';
+        if (!io.startsWith(spkistart))
+            throw Error(spkistart + ' not found')
+        if (!io.endsWith(spkiend))
+            throw Error(spkiend + ' not found')
+        io = io.substring(spkistart.length, io.length - spkiend.length);
+        io = io.replace(/[\r\n ]+/g, '');
+        return await window.crypto.subtle.importKey(
+            'spki',
+            str2ab(atob(io)),
+            {
+                name: "RSA-OAEP",
+                hash: "SHA-256",
+            },
+            false,
+            ['encrypt']
+        );
+    }
+    document.getElementById('encrypt').onclick=async ()=>{
+        try{
+            let pubkey = await spki(document.getElementById('spki').value);
+            let data = pem2der(document.getElementById('data').value);
+            let symmetrickey = await window.crypto.subtle.generateKey({
+                    name: "AES-GCM",
+                    length: 256,
+                },
+                true,
+                ["encrypt"]
+            );
+            let exportedKey = await window.crypto.subtle.exportKey(
+                'raw',
+                symmetrickey,
+            );
+            let iv = window.crypto.getRandomValues(new Uint8Array(256/8));
+            let symmetrickeyivencrypted = await window.crypto.subtle.encrypt(
+                {
+                    name: "RSA-OAEP",
+                    hash: "SHA-256",
+                },
+                pubkey,
+                abmerge(exportedKey, iv)
+            );
+            let aesgcm = await window.crypto.subtle.encrypt(
+                {
+                    name: "AES-GCM",
+                    iv: iv
+                },
+                symmetrickey,
+                data
+            );
+            document.getElementById('out').value='#'+[btoa(ab2str(symmetrickeyivencrypted)), btoa(ab2str(aesgcm))].join(',');
+        } catch(e){
+            alert(e);
+        }
+    };
+</script>
